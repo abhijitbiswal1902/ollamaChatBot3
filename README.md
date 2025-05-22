@@ -1,5 +1,5 @@
-🧠 Ollama Chatbot V2
-This project is a version 2 of Ollamachatbot. This application allows users to upload PDF and Excel (.xlsx) files, ask questions about the content, and get intelligent answers using a locally hosted LLM with Ollama.
+🧠 Ollama Chatbot V3
+This project is a version 3 of Ollamachatbot. This application allows users to upload PDF and Excel (.xlsx) files, ask questions about the content, and get intelligent answers using a locally hosted LLM with Ollama.
 Changes from previous version:
 Updated UI
 Users can uploaded PDF and Excel files files for quering and generating responses based on the files.
@@ -28,7 +28,7 @@ NOTE:If working on any environment apart from Macos please verify the .env file 
 
 📦 Installation Steps
 1. Clone the Repository
-git clone https://github.com/your-username/ollama-chatbot.git
+git clone https://github.com/abhijitbiswal1902/OllamaChatbot3
 cd ollama-chatbot
 
 2. Set Up the Backend
