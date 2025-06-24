@@ -1,118 +1,128 @@
-// Import required modules
-const express = require("express");
-const multer = require("multer"); // For handling file uploads
-const parsePDF = require("../utils/parsePDF"); // Utility to extract text from PDFs
-const parseExcel = require("../utils/parseExcel"); // Utility to extract text from Excel files
-const chunkText = require("../utils/chunkText"); // Utility to split long text into smaller chunks
-const embedChunks = require("../utils/embedChunks"); // Utility to embed each chunk into a vector
-const { findMostRelevant } = require("../utils/vectorUtils"); // Utility to compare embeddings and get top matches
-const axios = require("axios"); // HTTP client for API requests
 
-// Create Express router
-const router = express.Router();
 
-// Configure multer for handling multipart form data (file upload)
-const upload = multer();
 
-// Define POST route for processing file and prompt
+// Importing required modules
+const express = require("express"); // Web framework
+const multer = require("multer");   // For handling file uploads
+const axios = require("axios");     // For making HTTP requests
+const path = require("path");       // For file path operations
+
+// Importing custom utility functions for parsing and processing files
+const parsePDF = require("../utils/parsePDF");       // PDF parser
+const parseExcel = require("../utils/parseExcel");   // Excel (.xlsx) parser
+const chunkText = require("../utils/chunkText");     // Function to split large text into smaller chunks
+const embedChunks = require("../utils/embedChunks"); // Generates embeddings for text chunks
+const { findMostRelevant } = require("../utils/vectorUtils"); // Finds most relevant text chunks using vector similarity
+const Tesseract = require("tesseract.js");           // OCR library for image-to-text
+
+const router = express.Router();     // Creates a new router instance
+const upload = multer();            // Initialize multer to parse multipart/form-data (like file uploads)
+
+// Helper: Parse plain text file buffer to UTF-8 string
+const parseTxt = (buffer) => buffer.toString("utf-8").trim();
+
+// Helper: Extract text from image using OCR
+const parseImage = async (buffer) => {
+  const { data } = await Tesseract.recognize(buffer, "eng"); // Use English language
+  return data.text.trim(); // Return trimmed extracted text
+};
+
+// Route handler for POST /chat
 router.post("/", upload.single("file"), async (req, res) => {
   try {
-    // Extract prompt and uploaded file from the request
-    const { prompt } = req.body;
+    // Extract prompt and response format from request body, and file from the uploaded content
+    const { prompt, format } = req.body;
     const file = req.file;
 
-    // Check if both file and prompt are provided
+    // Validate input
     if (!file || !prompt) {
-      return res.status(400).json({ error: "Missing file or prompt" });
+      return res.status(400).json({ error: "Missing file or prompt." });
     }
 
-    // Log file and prompt info
     console.log("📁 File received:", file.originalname);
     console.log("❓ Prompt received:", prompt);
 
-    // Step 1: Parse file content into plain text
-    let text = "";
-    if (file.originalname.endsWith(".pdf")) {
-      text = await parsePDF(file.buffer); // Parse PDF buffer
-    } else if (file.originalname.endsWith(".xlsx")) {
-      text = parseExcel(file.buffer); // Parse Excel buffer
+    const name = file.originalname.toLowerCase(); // Lowercase the filename
+    let text = ""; // Will hold parsed file text
+
+    // File type detection and respective parsing
+    if (name.endsWith(".pdf")) {
+      text = await parsePDF(file.buffer); // Use PDF parser
+    } else if (name.endsWith(".xlsx")) {
+      text = parseExcel(file.buffer);     // Use Excel parser
+    } else if (name.endsWith(".txt")) {
+      text = parseTxt(file.buffer);       // Parse plain text file
+    } else if (name.endsWith(".jpg") || name.endsWith(".jpeg") || name.endsWith(".png")) {
+      text = await parseImage(file.buffer); // OCR image and extract text
     } else {
-      return res.status(400).json({ error: "Unsupported file type" });
+      return res.status(400).json({ error: "Unsupported file type." });
     }
 
-    console.log("Parsed text length:", text.length);
+    // Ensure parsed text is meaningful and long enough
+    if (!text || text.trim().length < 30) {
+      return res.status(400).json({ error: "Parsed content is too short or empty." });
+    }
 
-    // Step 2: Break parsed text into smaller, manageable chunks
+    // Log a preview of the parsed text
+    console.log("📝 Parsed Text Sample:\n", text.slice(0, 500));
+
+    // Break the text into smaller chunks for processing
     const chunks = chunkText(text);
-    console.log("🔗 Number of chunks:", chunks.length);
+    console.log("🔗 Number of text chunks:", chunks.length);
 
-    // Step 3: Embed all chunks into vector representations
+    // Generate embeddings for each chunk
     const embeddedChunks = await embedChunks(chunks);
     console.log("📌 Embedded chunks:", embeddedChunks.length);
 
-    // Step 4: Embed the user prompt
+    // Create embedding for the user's prompt using Ollama embedding API
     const promptEmbeddingRes = await axios.post(
-      "http://127.0.0.1:11434/api/embeddings", // Local embedding API
-      {
-        model: "nomic-embed-text", // Embedding model
-        prompt, // Text to embed
-      },
-      { timeout: 10000 } // 10-second timeout
+      "http://127.0.0.1:11434/api/embeddings",
+      { model: "nomic-embed-text", prompt },
+      { timeout: 10000 }
     );
-    const promptEmbedding = promptEmbeddingRes.data.embedding; // Extract the embedding vector
+    const promptEmbedding = promptEmbeddingRes.data.embedding;
 
-    // Step 5: Find the top 3 most relevant chunks compared to the prompt
+    // Use vector similarity to find top 3 most relevant chunks
     const topChunks = findMostRelevant(promptEmbedding, embeddedChunks, 3);
+    const context = topChunks.map(c => c.text).join("\n---\n"); // Join selected context with separators
 
-    // Merge top chunks into a single string with separators
-    const context = topChunks.map((c) => c.text).join("\n---\n");
+    // System instruction varies based on requested format
+    const systemInstruction = format === "json"
+      ? "Respond with only a JSON array of objects based on this context."
+      : "Respond in clear and natural language. Do not mention that you are an AI. Do not say 'based on the context'.";
 
-    console.log("📚 Top chunks selected for context.");
+    // Construct the final prompt for LLM
+    const fullPrompt = `You are an intelligent assistant. Based only on the context below, answer the user's question clearly.\n\nContext:\n${context}\n\nQuestion:\n${prompt}\n\n${systemInstruction}`.trim();
 
-    // Step 6: Prepare a final prompt for the model using the context and user question
-    const fullPrompt = `Answer based only on this context:\n${context}\n\nQuestion: ${prompt}`;
-
-    // Step 7: Send the full prompt to the LLaMA 3 model via Ollama API
+    // Send prompt to Ollama model (llama3) for chat response
     const chatRes = await axios.post(
       "http://127.0.0.1:11434/api/chat",
       {
-        model: "llama3", // Model name
-        messages: [{ role: "user", content: fullPrompt }], // Prompt as chat message
-        stream: false, // Disable streaming
+        model: "llama3",
+        messages: [{ role: "user", content: fullPrompt }],
+        stream: false,
       },
-      { timeout: 2000000 } // 200-second timeout
+      { timeout: 2000000 }
     );
 
-    // Log full response from model
-    console.log("Full model response:", JSON.stringify(chatRes.data, null, 2));
-
-    // Extract the actual response message content from the API response
     const message = chatRes?.data?.message?.content;
+    console.log("✅ Model response received.");
 
-    console.log("Extracted message content:", message);
-
-    // If message is present, return it to the client
+    // Return model's message
     if (message) {
-      console.log("✅ Model response received.");
       res.json({ response: message });
     } else {
-      // Handle unexpected model response
-      console.error("❌ Unexpected response format from model:", chatRes.data);
-      res.status(500).json({ error: "Unexpected response from model" });
+      res.status(500).json({ error: "Unexpected response from the model." });
     }
   } catch (error) {
-    // General error handler
+    // Log and return error response
     console.error("❌ Error in /chat route:", error.message || error);
-
-    // Log additional error response info if available
     if (error.response) {
-      console.error("🔍 Error response from Ollama:", error.response.data);
+      console.error("🔍 Ollama error response:", error.response.data);
     }
-
-    // Return 500 server error to client
-    res.status(500).json({ error: "Server error" });
+    res.status(500).json({ error: "Internal server error." });
   }
 });
 
-// Export the router to be used in main server
+// Export router to be used in your main app.js
 module.exports = router;
